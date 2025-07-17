@@ -1,35 +1,75 @@
+use fefix::{prelude::*};
+use fefix::tagvalue::{Decoder, Config};
+use fefix::definitions::fix50::*;
 
 use crate::exchange::*;
 
 pub fn handle_fix_message(exchange: &mut Exchange, message: &str) {
-    let fields: std::collections::HashMap<_, _> = message
-        .split('|')
-        .filter_map(|kv| {
-            let mut parts = kv.splitn(2, '=');
-            Some((parts.next()?, parts.next()?))
-        })
-        .collect();
+    let dict = Dictionary::fix50();
+    let mut decoder = Decoder::<Config>::new(dict);
+    decoder.config_mut().set_separator(b'|');
 
-    match fields.get("35") {
-        Some(&"D") => {
-            // New Order Single
-            let ticker = fields.get("55").unwrap().to_uppercase();
-            let side = match fields.get("54") {
-                Some(&"1") => Side::Buy,
-                Some(&"2") => Side::Sell,
-                _ => return,
-            };
-            let price = fields.get("44").and_then(|p| p.parse::<f64>().ok()).unwrap_or(0.0);
-            let quantity = fields.get("38").and_then(|q| q.parse::<u32>().ok()).unwrap_or(0);
-            let order = Order::new(side, price, quantity, &ticker);
-            exchange.submit_order(order);
+    let msg = match decoder.decode(message) {
+        Ok(msg) => msg,
+        Err(e) => {
+            eprintln!("Failed to decode FIX message: {}", e);
+            return;
         }
-        Some(&"F") => {
-            // Cancel Order (if implemented)
-            // Placeholder for cancel logic
-        }
+    };
+
+    let sender_comp_id = match msg.fv::<&str>(SENDER_COMP_ID) {
+        Ok(comp_id) => comp_id,
         _ => {
-            eprintln!("Unknown or unsupported FIX message: {}", message);
+            eprintln!("Invalid Sender Organization Number");
+            return;
         }
-    }
+    };
+
+    let sender_sub_id = match msg.fv::<&str>(SENDER_SUB_ID) {
+        Ok(sub_id) => sub_id,
+        _ => {
+            eprintln!("");
+            return;
+        }
+    };
+
+    let client_order_id = match msg.fv::<&str>(CL_ORD_ID) {
+        Ok(id) => id,
+        _ => {
+            eprintln!("Invalid Client Order ID Number");
+            return;
+        }
+    };
+
+    let side = match msg.fv::<Side>(SIDE) {
+        Ok(side) => side,
+        _ => {
+            eprintln!("Invalid or missing side field");
+            return;
+        }
+    };
+
+    let quantity = match msg.fv::<u32>(QUANTITY) {
+        Ok(qty) => qty,
+        _ => {
+            eprintln!("Missing order quantity");
+            return;
+        }
+    };
+
+    let price = match msg.fv::<f64>(PRICE) {
+        Ok(price) => price,
+        _ => {
+            eprintln!("Missing price");
+            return;
+        }
+    };
+
+    let ticker = match msg.fv::<&str>(SYMBOL) {
+        Ok(symbol) => symbol,
+        _ => {
+            eprintln!("Missing symbol");
+            return;
+        }
+    };
 }

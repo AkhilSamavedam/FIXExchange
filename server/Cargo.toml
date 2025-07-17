@@ -7,8 +7,8 @@ edition = "2021"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Optional
 shared = { path = "../shared" }
 strum_macros = "0.27.1"
 strum = "0.27.1"
 parking_lot = "0.12.4"
+fefix = { version = "0.7", features = ["fix50", "utils-tokio", "utils-decimal"] }
