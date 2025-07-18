@@ -13,7 +13,6 @@ use fefix::fix_values::Timestamp;
 #[derive(Clone, Debug)]
 pub(crate) struct Order {
     server_order_id: u64,
-    client_order_id: u64,
     send_timestamp: Timestamp,
     receive_timestamp: Timestamp,
     price: f64,
@@ -26,6 +25,7 @@ pub(crate) struct Order {
     account_id: String,
     sender_org_id: String,
     sender_sub_id: String,
+    client_order_id: String
 }
 
 impl PartialEq for Order {
@@ -251,32 +251,28 @@ impl OrderBook {
     }
 }
 
-#[derive(Debug)]
-pub struct Exchange {
-    order_counter: AtomicU64,
-    books_lock: RwLock<()>,
-    books: HashMap<String, Arc<RwLock<OrderBook>>>,
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Bankroll {
     pub cash: f64,
     pub positions: HashMap<String, i64>, // instrument -> quantity
 }
 
+#[derive(Debug)]
+pub struct Exchange {
+    order_counter: u64,
+    books: HashMap<String, OrderBook>,
+}
 
 impl Exchange {
     pub fn new() -> Self {
         Self {
-            order_counter: AtomicU64::new(1),
-            books_lock: RwLock::new(()),
+            order_counter: 1,
             books: HashMap::new(),
         }
     }
 
     pub(crate) fn create_order(
         &mut self,
-        client_order_id: u64,
         send_timestamp: Timestamp,
         price: f64,
         quantity: u32,
@@ -284,15 +280,16 @@ impl Exchange {
         order_type: OrdType,
         time_in_force: TimeInForce,
         exec_instruction: ExecInst,
-        instrument_id: String,
-        account_id: String,
-        sender_org_id: String,
-        sender_sub_id: String,
+        instrument_id: &str,
+        account_id: &str,
+        sender_org_id: &str,
+        sender_sub_id: &str,
+        client_order_id: &str,
+
     ) -> Order {
 
-        Order {
-            server_order_id: self.order_counter.fetch_add(1, AtomicOrdering::Relaxed),
-            client_order_id: client_order_id,
+        let o = Order {
+            server_order_id: self.order_counter,
             send_timestamp: send_timestamp,
             receive_timestamp: Timestamp::utc_now(),
             price: price,
@@ -301,15 +298,17 @@ impl Exchange {
             order_type: order_type,
             time_in_force: time_in_force,
             exec_instruction: exec_instruction,
-            instrument_id: instrument_id,
-            account_id: account_id,
-            sender_org_id: sender_org_id,
-            sender_sub_id: sender_sub_id
-        }
+            instrument_id: instrument_id.into(),
+            account_id: account_id.into(),
+            sender_org_id: sender_org_id.into(),
+            sender_sub_id: sender_sub_id.into(),
+            client_order_id: client_order_id.into()
+        };
+        self.order_counter += 1;
+        o
     }
 
     pub(crate) fn submit_order(&mut self, order: Order) {
-        let _ = self.books_lock.read();
         if !self.books.contains_key(&order.instrument_id) {
             // Instrument does not exist, reject order
             return;
@@ -317,7 +316,6 @@ impl Exchange {
 
         if order.order_type == OrdType::Market {
             if let Some(book) = self.books.get(&order.instrument_id) {
-                let book = book.read();
                 match order.side {
                     Side::Buy => {
                         if book.asks.is_empty() {
@@ -335,14 +333,12 @@ impl Exchange {
                 return;
             }
         }
-        let book = self.books.get(&order.instrument_id).unwrap();
-        book.write().match_order(order);
+        let book = self.books.get_mut(&order.instrument_id).unwrap();
+        book.match_order(order);
     }
 
     pub(crate) fn cancel_order(&mut self, ticker: String, side: Side, order_id: u64) -> bool {
-        let _ = self.books_lock.read();
-        if let Some(book_lock) = self.books.get(&ticker) {
-            let mut book = book_lock.write();
+        if let Some(book) = self.books.get_mut(&ticker) {
             match side {
                 Side::Buy => {
                     let mut new_bids = BinaryHeap::new();
@@ -376,34 +372,28 @@ impl Exchange {
         false
     }
 
-    pub(crate) fn get_order_book(&self, ticker: &str) -> Option<Arc<RwLock<OrderBook>>> {
-        let _ = self.books_lock.read();
+    pub(crate) fn get_order_book(&self, ticker: &str) -> Option<OrderBook> {
         self.books.get(ticker).cloned()
     }
 
     pub(crate) fn get_bids(&self, ticker: &str) -> Option<Vec<Order>> {
-        let _ = self.books_lock.read();
         self.books.get(ticker).map(|book| {
-            let book = book.read();
             book.bids.iter().cloned().collect()
         })
     }
 
     pub(crate) fn get_asks(&self, ticker: &str) -> Option<Vec<Order>> {
-        let _ = self.books_lock.read();
         self.books.get(ticker).map(|book| {
-            let book = book.read();
             book.asks.iter().map(|r| r.0.clone()).collect()
         })
     }
 
     pub(crate) fn create_instrument(&mut self, symbol: &str) {
-        let _ = self.books_lock.write();
-        self.books.entry(symbol.to_string()).or_insert_with(|| {
-            Arc::new(RwLock::new(OrderBook {
+        self.books.entry(symbol.into()).or_insert_with(|| {
+            OrderBook {
                 bids: BinaryHeap::new(),
                 asks: BinaryHeap::new(),
-            }))
+            }
         });
     }
 }
