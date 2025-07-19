@@ -10,7 +10,7 @@ use crate::engine::EngineMessage;
 use crate::types::*;
 
 #[derive(Clone, Debug)]
-pub(crate) struct Order {
+struct Order {
     order_id: OrderID,
     price: Price,
     quantity: Quantity,
@@ -294,7 +294,7 @@ impl OrderBook {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Bankroll {
     pub cash: f64,
-    pub positions: HashMap<String, i64>, // instrument -> quantity
+    pub positions: HashMap<InstrumentID, AccountBalance>, // instrument -> quantity
 }
 
 #[derive(Debug)]
@@ -396,10 +396,6 @@ impl Exchange {
             EngineMessage::AmendOrder {
                 sending_time,
                 receiving_time,
-                order_id,
-                new_quantity,
-                new_price,
-                time_in_force,
                 ..
             } => {
                 // Extract sending_time and receiving_time at the beginning of the branch (future logic)
