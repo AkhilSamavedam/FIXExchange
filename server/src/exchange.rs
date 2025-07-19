@@ -304,7 +304,7 @@ impl OrderBook {
         fills
     }
 
-    pub fn remove_order(&mut self, order_id: u64, client_id: ClientID) -> bool {
+    fn remove_order(&mut self, order_id: u64, client_id: ClientID) -> bool {
         if let Some((side, price)) = self.order_index.get(&order_id).cloned() {
             let queue_opt = match side {
                 Side::Buy => self.bids.get_mut(&OrderedFloat(price)),
