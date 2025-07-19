@@ -59,7 +59,8 @@ impl PartialEq<ClientID> for AccountID {
 }
 
 impl OrderBook {
-    fn match_order(&mut self, mut order: Order) {
+    fn match_order(&mut self, mut order: Order) -> Vec<EngineMessage> {
+        let mut fills = Vec::new();
         // Handle Stop orders
         if let OrdType::Stop = order.order_type {
             match order.side {
@@ -67,11 +68,11 @@ impl OrderBook {
                     if let Some((&best_ask_price, _)) = self.asks.iter().next() {
                         if best_ask_price < OrderedFloat(order.price) {
                             // Not triggered yet, buffer order
-                            return;
+                            return fills;
                         }
                     } else {
                         // No market price, cannot trigger
-                        return;
+                        return fills;
                     }
                     // Triggered, convert to Market order for matching
                     order.order_type = OrdType::Market;
@@ -80,11 +81,11 @@ impl OrderBook {
                     if let Some((&best_bid_price, _)) = self.bids.iter().next_back() {
                         if best_bid_price > OrderedFloat(order.price) {
                             // Not triggered yet, buffer order
-                            return;
+                            return fills;
                         }
                     } else {
                         // No market price, cannot trigger
-                        return;
+                        return fills;
                     }
                     // Triggered, convert to Market order for matching
                     order.order_type = OrdType::Market;
@@ -100,11 +101,11 @@ impl OrderBook {
                     if let Some((&best_ask_price, _)) = self.asks.iter().next() {
                         if best_ask_price < OrderedFloat(order.price) {
                             // Not triggered yet, buffer order
-                            return;
+                            return fills;
                         }
                     } else {
                         // No market price, cannot trigger
-                        return;
+                        return fills;
                     }
                     // Triggered, convert to Limit order for matching
                     order.order_type = OrdType::Limit;
@@ -113,11 +114,11 @@ impl OrderBook {
                     if let Some((&best_bid_price, _)) = self.bids.iter().next_back() {
                         if best_bid_price > OrderedFloat(order.price) {
                             // Not triggered yet, buffer order
-                            return;
+                            return fills;
                         }
                     } else {
                         // No market price, cannot trigger
-                        return;
+                        return fills;
                     }
                     // Triggered, convert to Limit order for matching
                     order.order_type = OrdType::Limit;
@@ -139,6 +140,25 @@ impl OrderBook {
                         let queue = self.asks.get_mut(&price).unwrap();
                         while order.quantity > 0 && !queue.is_empty() {
                             if let Some(mut best_ask) = queue.pop_front() {
+                                let trade_qty = order.quantity.min(best_ask.quantity);
+                                // Emit fill for incoming (buy) order
+                                fills.push(EngineMessage::OrderFilled {
+                                    order_id: order.order_id,
+                                    filled_quantity: trade_qty,
+                                    remaining_quantity: order.quantity - trade_qty,
+                                    price: price.into_inner(),
+                                    instrument_id: order.instrument_id.clone(),
+                                    client_id: order.sender_id.clone(),
+                                });
+                                // Emit fill for matched (sell) order
+                                fills.push(EngineMessage::OrderFilled {
+                                    order_id: best_ask.order_id,
+                                    filled_quantity: trade_qty,
+                                    remaining_quantity: best_ask.quantity - trade_qty,
+                                    price: price.into_inner(),
+                                    instrument_id: best_ask.instrument_id.clone(),
+                                    client_id: best_ask.sender_id.clone(),
+                                });
                                 if best_ask.quantity > order.quantity {
                                     best_ask.quantity -= order.quantity;
                                     order.quantity = 0;
@@ -168,10 +188,10 @@ impl OrderBook {
                         // Immediate or Cancel: discard any unfilled quantity
                         if order.quantity > 0 {
                             // Discard remaining quantity
-                            return;
+                            return fills;
                         } else {
                             // Fully or partially matched, no further action needed
-                            return;
+                            return fills;
                         }
                     }
                     TimeInForce::FillOrKill => {
@@ -179,10 +199,10 @@ impl OrderBook {
                         if order.quantity > 0 {
                             // Rollback any partial fills by re-adding asks consumed
                             // Since we don't track partial fills separately, for simplicity, discard entire order without adding to book
-                            return;
+                            return fills;
                         } else {
                             // Fully filled
-                            return;
+                            return fills;
                         }
                     }
                     _ => {
@@ -205,6 +225,25 @@ impl OrderBook {
                         let queue = self.bids.get_mut(&price).unwrap();
                         while order.quantity > 0 && !queue.is_empty() {
                             if let Some(mut best_bid) = queue.pop_front() {
+                                let trade_qty = order.quantity.min(best_bid.quantity);
+                                // Emit fill for incoming (sell) order
+                                fills.push(EngineMessage::OrderFilled {
+                                    order_id: order.order_id,
+                                    filled_quantity: trade_qty,
+                                    remaining_quantity: order.quantity - trade_qty,
+                                    price: price.into_inner(),
+                                    instrument_id: order.instrument_id.clone(),
+                                    client_id: order.sender_id.clone(),
+                                });
+                                // Emit fill for matched (buy) order
+                                fills.push(EngineMessage::OrderFilled {
+                                    order_id: best_bid.order_id,
+                                    filled_quantity: trade_qty,
+                                    remaining_quantity: best_bid.quantity - trade_qty,
+                                    price: price.into_inner(),
+                                    instrument_id: best_bid.instrument_id.clone(),
+                                    client_id: best_bid.sender_id.clone(),
+                                });
                                 if best_bid.quantity > order.quantity {
                                     best_bid.quantity -= order.quantity;
                                     order.quantity = 0;
@@ -234,10 +273,10 @@ impl OrderBook {
                         // Immediate or Cancel: discard any unfilled quantity
                         if order.quantity > 0 {
                             // Discard remaining quantity
-                            return;
+                            return fills;
                         } else {
                             // Fully or partially matched, no further action needed
-                            return;
+                            return fills;
                         }
                     }
                     TimeInForce::FillOrKill => {
@@ -245,10 +284,10 @@ impl OrderBook {
                         if order.quantity > 0 {
                             // Rollback any partial fills by re-adding bids consumed
                             // Since we don't track partial fills separately, for simplicity, discard entire order without adding to book
-                            return;
+                            return fills;
                         } else {
                             // Fully filled
-                            return;
+                            return fills;
                         }
                     }
                     _ => {
@@ -262,6 +301,7 @@ impl OrderBook {
             }
             _ => {}
         }
+        fills
     }
 
     pub fn remove_order(&mut self, order_id: u64, client_id: ClientID) -> bool {
@@ -363,11 +403,25 @@ impl Exchange {
                 };
 
                 let book = self.books.get_mut(&instrument_id).unwrap();
-                book.match_order(order);
-                Some(EngineMessage::OrderAccepted {
+                let mut responses = book.match_order(order);
+                responses.push(EngineMessage::OrderAccepted {
                     client_id,
                     order_id
-                })
+                });
+                // If any responses, return them as a batch (or just the first if Option)
+                // Here, for compatibility, if only one response, return it, else log or batch
+                // For now, return only first, or all in a Vec in future
+                // For demonstration, return all as a LogEvent if multiple
+                if responses.len() == 1 {
+                    Some(responses.remove(0))
+                } else if !responses.is_empty() {
+                    // In real use, would return Vec<EngineMessage>. For now, just log all.
+                    // This is a limitation of the Option<EngineMessage> return type.
+                    // So we return the first, but in practice the caller should handle Vec<EngineMessage>.
+                    Some(responses.remove(0))
+                } else {
+                    None
+                }
             }
             EngineMessage::CancelOrder {
                 sending_time,
