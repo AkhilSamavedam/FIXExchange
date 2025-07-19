@@ -3,9 +3,10 @@ use fefix::tagvalue::{Decoder, Config};
 use fefix::definitions::fix50::*;
 use fefix::fix_values::Timestamp;
 
-use crate::exchange::*;
+use crate::types::*;
+use crate::engine::EngineMessage;
 
-pub fn handle_fix_message(exchange: &mut Exchange, message: &str) {
+pub fn handle_fix_message(message: &str) -> EngineMessage {
     let dict = Dictionary::fix50();
     let mut decoder = Decoder::<Config>::new(dict);
     decoder.config_mut().set_separator(b'|');
@@ -13,121 +14,200 @@ pub fn handle_fix_message(exchange: &mut Exchange, message: &str) {
     let msg = match decoder.decode(message) {
         Ok(msg) => msg,
         Err(e) => {
-            eprintln!("Failed to decode FIX message: {}", e);
-            return;
+            return EngineMessage::InvalidMessage {
+                reason: e.to_string(),
+                raw_message: message.to_string(),
+            };
         }
     };
 
-    let sender_comp_id = match msg.fv::<&str>(SENDER_COMP_ID) {
-        Ok(comp_id) => comp_id,
+    // Common fields
+    let sender_comp_id = msg.fv::<&str>(SENDER_COMP_ID).unwrap_or("UNKNOWN");
+    let sender_sub_id = msg.fv::<&str>(SENDER_SUB_ID).ok();
+    let client_id = ClientID::new(sender_comp_id.to_string(), sender_sub_id.map(str::to_string));
+
+    let sending_time = match msg.fv::<Timestamp>(SENDING_TIME) {
+        Ok(ts) => ts,
+        Err(e) => {
+            return EngineMessage::InvalidMessage {
+                reason: e.unwrap().to_string(),
+                raw_message: message.to_string(),
+            };
+        }
+    };
+
+    let receiving_time = Timestamp::utc_now();
+
+    // MsgType determines what we should parse
+    let msg_type = match msg.fv::<&str>(MSG_TYPE) {
+        Ok(t) => t,
+        Err(e) => {
+            return EngineMessage::InvalidMessage {
+                reason: e.unwrap().to_string(),
+                raw_message: message.to_string(),
+            };
+        }
+    };
+
+    match msg_type {
+        "D" => {
+            // New Order - Single
+            let instrument_id: InstrumentID = match msg.fv::<&str>(SYMBOL) {
+                Ok(id) => id.to_string(),
+                Err(e) => {
+                    return EngineMessage::InvalidMessage {
+                        reason: e.unwrap().to_string(),
+                        raw_message: message.to_string(),
+                    };
+                }
+            };
+
+            let side = match msg.fv::<Side>(SIDE) {
+                Ok(s) => s,
+                Err(_) => {
+                    return EngineMessage::InvalidMessage {
+                        reason: "Missing or invalid Side".to_string(),
+                        raw_message: message.to_string(),
+                    };
+                }
+            };
+
+            let quantity = match msg.fv::<Quantity>(QUANTITY) {
+                Ok(qty) => qty,
+                Err(_) => {
+                    return EngineMessage::InvalidMessage {
+                        reason: "Missing or invalid Quantity".to_string(),
+                        raw_message: message.to_string(),
+                    };
+                }
+            };
+
+            let order_type = match msg.fv::<OrdType>(ORD_TYPE) {
+                Ok(ot) => ot,
+                Err(_) => {
+                    return EngineMessage::InvalidMessage {
+                        reason: "Missing or invalid OrdType".to_string(),
+                        raw_message: message.to_string(),
+                    };
+                }
+            };
+
+            let time_in_force = msg.fv::<TimeInForce>(TIME_IN_FORCE).ok();
+
+            // Only parse price if order type requires it
+            let price = match order_type {
+                OrdType::Limit | OrdType::StopLimit => match msg.fv::<Price>(PRICE) {
+                    Ok(p) => Some(p),
+                    Err(_) => {
+                        return EngineMessage::InvalidMessage {
+                            reason: "Missing or invalid Price for limit/stop-limit order.".to_string(),
+                            raw_message: message.to_string(),
+                        };
+                    }
+                },
+                _ => None,
+            };
+
+            let account_id: AccountID = match msg.fv::<&str>(ACCOUNT) {
+                Ok(id) => id.to_string(),
+                Err(_) => {
+                    return EngineMessage::InvalidMessage {
+                        reason: "Missing or invalid Account ID".to_string(),
+                        raw_message: message.to_string(),
+                    };
+                }
+            };
+
+            EngineMessage::NewOrder {
+                sending_time,
+                receiving_time,
+                client_id,
+                account_id,
+                instrument_id,
+                order_type,
+                side,
+                quantity,
+                price,
+                time_in_force
+            }
+        }
+        "F" => {
+            // Cancel Order
+            let order_id = match msg.fv::<OrderID>(ORDER_ID) {
+                Ok(id) => id,
+                Err(_) => {
+                    return EngineMessage::InvalidMessage {
+                        reason: "Missing or invalid ClOrdID".to_string(),
+                        raw_message: message.to_string(),
+                    };
+                }
+            };
+
+            let account_id = match msg.fv::<&str>(ACCOUNT) {
+                Ok(id) => id.to_string(),
+                Err(_) => {
+                    return EngineMessage::InvalidMessage {
+                        reason: "Missing or invalid account ID".to_string(),
+                        raw_message: message.to_string(),
+                    };
+                }
+            };
+
+            EngineMessage::CancelOrder {
+                sending_time,
+                receiving_time,
+                client_id,
+                account_id,
+                order_id,
+            }
+        }
+        "UCI" => {
+            // Custom type: Create Instrument
+            let instrument_id: InstrumentID = match msg.fv::<&str>(SYMBOL) {
+                Ok(id) => id.to_string(),
+                Err(_) => {
+                    return EngineMessage::InvalidMessage {
+                        reason: "Missing or invalid Symbol".to_string(),
+                        raw_message: message.to_string(),
+                    };
+                }
+            };
+            
+            EngineMessage::CreateInstrument {
+                sending_time,
+                receiving_time,
+                instrument_id,
+            }
+        }
+        "G" => {
+            // Amend Order
+            let order_id = match msg.fv::<OrderID>(ORDER_ID) {
+                Ok(id) => id,
+                Err(_) => {
+                    return EngineMessage::InvalidMessage {
+                        reason: "Missing or invalid Order ID".to_string(),
+                        raw_message: message.to_string(),
+                    };
+                }
+            };
+            let new_quantity = msg.fv::<Quantity>(ORDER_QTY).ok();
+            let new_price = msg.fv::<Price>(PRICE).ok();
+            let time_in_force = msg.fv::<TimeInForce>(TIME_IN_FORCE).ok();
+
+            EngineMessage::AmendOrder {
+                sending_time,
+                receiving_time,
+                order_id,
+                new_quantity,
+                new_price,
+                time_in_force,
+            }
+        }
         _ => {
-            eprintln!("Invalid Sender Organization Number.");
-            return;
+            EngineMessage::InvalidMessage {
+                reason: format!("Unhandled MsgType: {}", msg_type),
+                raw_message: message.to_string(),
+            }
         }
-    };
-
-    let sender_sub_id = match msg.fv::<&str>(SENDER_SUB_ID) {
-        Ok(sub_id) => sub_id,
-        _ => {
-            eprintln!("Invalid Sender Sub ID.");
-            return;
-        }
-    };
-
-    let sender_timestamp = match msg.fv::<Timestamp>(SENDING_TIME) {
-        Ok(sender_timestamp) => sender_timestamp,
-        _ => {
-            eprintln!("Invalid Sending Time.");
-            return;
-        }
-    };
-
-    let client_order_id = match msg.fv::<&str>(CL_ORD_ID) {
-        Ok(id) => id,
-        _ => {
-            eprintln!("Invalid Client Order ID Number.");
-            return;
-        }
-    };
-
-    let account_id = match msg.fv::<&str>(ACCOUNT) {
-        Ok(id) => id,
-        _ => {
-            eprintln!("Invalid Account ID.");
-            return;
-        }
-    };
-
-    let order_type = match msg.fv::<OrdType>(ORD_TYPE) {
-        Ok(order_type) => order_type,
-        _ => {
-            eprintln!("Invalid Order Type.");
-            return;
-        }
-    };
-
-    let time_in_force = match msg.fv::<TimeInForce>(TIME_IN_FORCE) {
-        Ok(time_in_force) => time_in_force,
-        _ => {
-            eprintln!("Invalid Time InForce.");
-            return;
-        }
-    };
-
-    let exec_instruction = match msg.fv::<ExecInst>(EXEC_INST) {
-        Ok(exec_instruction) => exec_instruction,
-        _ => {
-            eprintln!("Invalid Execution Instruction.");
-            return;
-        }
-    };
-
-    let ticker = match msg.fv::<&str>(SYMBOL) {
-        Ok(symbol) => symbol,
-        _ => {
-            eprintln!("Invalid Ticker.");
-            return;
-        }
-    };
-
-    let side = match msg.fv::<Side>(SIDE) {
-        Ok(side) => side,
-        _ => {
-            eprintln!("Invalid or missing side field.");
-            return;
-        }
-    };
-
-    let quantity = match msg.fv::<u32>(QUANTITY) {
-        Ok(qty) => qty,
-        _ => {
-            eprintln!("Missing order quantity.");
-            return;
-        }
-    };
-
-    let price = match msg.fv::<f64>(PRICE) {
-        Ok(price) => price,
-        _ => {
-            eprintln!("Missing price.");
-            return;
-        }
-    };
-
-    let order = exchange.create_order(
-        sender_timestamp,
-        price,
-        quantity,
-        side,
-        order_type,
-        time_in_force,
-        exec_instruction,
-        ticker,
-        account_id,
-        sender_comp_id,
-        sender_sub_id,
-        client_order_id,
-    );
-
-    exchange.submit_order(order);
+    }
 }

@@ -5,6 +5,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 mod exchange;
 mod fix;
+mod engine;
+mod types;
 
 use exchange::Exchange;
 use fix::handle_fix_message;

@@ -1,36 +1,33 @@
-use std::collections::binary_heap::BinaryHeap;
-use std::cmp::{Ordering, Reverse};
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::collections::{BTreeMap, VecDeque, HashMap};
+use std::cmp::{Ordering, PartialEq};
 
+use ordered_float::OrderedFloat;
 use serde::{Serialize, Deserialize};
-use parking_lot::{RwLock};
 use fefix::definitions::fix50::*;
 use fefix::fix_values::Timestamp;
 
+use crate::engine::EngineMessage;
+use crate::types::*;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Order {
-    server_order_id: u64,
+    order_id: OrderID,
+    price: Price,
+    quantity: Quantity,
     send_timestamp: Timestamp,
     receive_timestamp: Timestamp,
-    price: f64,
-    quantity: u32,
     side: Side,
     order_type: OrdType,
     time_in_force: TimeInForce,
     exec_instruction: ExecInst,
-    instrument_id: String,
-    account_id: String,
-    sender_org_id: String,
-    sender_sub_id: String,
-    client_order_id: String
+    instrument_id: InstrumentID,
+    account_id: AccountID,
+    sender_id: ClientID,
 }
 
 impl PartialEq for Order {
     fn eq(&self, other: &Self) -> bool {
-        self.server_order_id == other.server_order_id
+        self.order_id == other.order_id
     }
 }
 
@@ -50,8 +47,15 @@ impl PartialOrd for Order {
 
 #[derive(Clone, Debug)]
 struct OrderBook {
-    bids: BinaryHeap<Order>,
-    asks: BinaryHeap<Reverse<Order>>
+    bids: BTreeMap<OrderedFloat<f64>, VecDeque<Order>>, // descending order if needed
+    asks: BTreeMap<OrderedFloat<f64>, VecDeque<Order>>, // ascending order
+    order_index: HashMap<u64, (Side, f64)>,
+}
+
+impl PartialEq<ClientID> for AccountID {
+    fn eq(&self, other: &ClientID) -> bool {
+        todo!()
+    }
 }
 
 impl OrderBook {
@@ -60,8 +64,8 @@ impl OrderBook {
         if let OrdType::Stop = order.order_type {
             match order.side {
                 Side::Buy => {
-                    if let Some(Reverse(best_ask)) = self.asks.peek() {
-                        if best_ask.price < order.price {
+                    if let Some((&best_ask_price, _)) = self.asks.iter().next() {
+                        if best_ask_price < OrderedFloat(order.price) {
                             // Not triggered yet, buffer order
                             return;
                         }
@@ -73,8 +77,8 @@ impl OrderBook {
                     order.order_type = OrdType::Market;
                 }
                 Side::Sell => {
-                    if let Some(best_bid) = self.bids.peek() {
-                        if best_bid.price > order.price {
+                    if let Some((&best_bid_price, _)) = self.bids.iter().next_back() {
+                        if best_bid_price > OrderedFloat(order.price) {
                             // Not triggered yet, buffer order
                             return;
                         }
@@ -93,8 +97,8 @@ impl OrderBook {
         else if let OrdType::StopLimit = order.order_type {
             match order.side {
                 Side::Buy => {
-                    if let Some(Reverse(best_ask)) = self.asks.peek() {
-                        if best_ask.price < order.price {
+                    if let Some((&best_ask_price, _)) = self.asks.iter().next() {
+                        if best_ask_price < OrderedFloat(order.price) {
                             // Not triggered yet, buffer order
                             return;
                         }
@@ -106,8 +110,8 @@ impl OrderBook {
                     order.order_type = OrdType::Limit;
                 }
                 Side::Sell => {
-                    if let Some(best_bid) = self.bids.peek() {
-                        if best_bid.price > order.price {
+                    if let Some((&best_bid_price, _)) = self.bids.iter().next_back() {
+                        if best_bid_price > OrderedFloat(order.price) {
                             // Not triggered yet, buffer order
                             return;
                         }
@@ -125,29 +129,33 @@ impl OrderBook {
         // Now proceed to matching logic
         match order.side {
             Side::Buy => {
-                let mut total_quantity_matched = 0;
-
-                while let Some(Reverse(best_ask)) = self.asks.peek() {
-                    if order.order_type == OrdType::Market
-                        || order.price >= best_ask.price
-                    {
-                        let mut best_ask = self.asks.pop().unwrap().0;
-
-                        if best_ask.quantity > order.quantity {
-                            best_ask.quantity -= order.quantity;
-                            total_quantity_matched += order.quantity;
-                            self.asks.push(Reverse(best_ask));
-                            order.quantity = 0;
-                            break;
-                        } else if best_ask.quantity < order.quantity {
-                            total_quantity_matched += best_ask.quantity;
-                            let remaining = order.quantity - best_ask.quantity;
-                            order.quantity = remaining;
-                            continue;
-                        } else {
-                            // Fully matched
-                            total_quantity_matched += best_ask.quantity;
-                            order.quantity = 0;
+                while order.quantity > 0 {
+                    let best_ask_price = if order.order_type == OrdType::Market {
+                        self.asks.keys().next().cloned()
+                    } else {
+                        self.asks.keys().next().filter(|&p| OrderedFloat(order.price) >= *p).cloned()
+                    };
+                    if let Some(price) = best_ask_price {
+                        let queue = self.asks.get_mut(&price).unwrap();
+                        while order.quantity > 0 && !queue.is_empty() {
+                            if let Some(mut best_ask) = queue.pop_front() {
+                                if best_ask.quantity > order.quantity {
+                                    best_ask.quantity -= order.quantity;
+                                    order.quantity = 0;
+                                    queue.push_front(best_ask);
+                                } else if best_ask.quantity < order.quantity {
+                                    order.quantity -= best_ask.quantity;
+                                    self.order_index.remove(&best_ask.order_id);
+                                } else {
+                                    order.quantity = 0;
+                                    self.order_index.remove(&best_ask.order_id);
+                                }
+                            }
+                        }
+                        if queue.is_empty() {
+                            self.asks.remove(&price);
+                        }
+                        if order.quantity == 0 {
                             break;
                         }
                     } else {
@@ -180,35 +188,40 @@ impl OrderBook {
                     _ => {
                         // Other TIF: post remaining quantity to book
                         if order.quantity > 0 {
-                            self.bids.push(order);
+                            self.bids.entry(OrderedFloat(order.price)).or_default().push_back(order.clone());
+                            self.order_index.insert(order.order_id, (Side::Buy, order.price));
                         }
                     }
                 }
             }
             Side::Sell => {
-                let mut total_quantity_matched = 0;
-
-                while let Some(best_bid) = self.bids.peek() {
-                    if order.order_type == OrdType::Market
-                        || order.price <= best_bid.price
-                    {
-                        let mut best_bid = self.bids.pop().unwrap();
-
-                        if best_bid.quantity > order.quantity {
-                            best_bid.quantity -= order.quantity;
-                            total_quantity_matched += order.quantity;
-                            self.bids.push(best_bid);
-                            order.quantity = 0;
-                            break;
-                        } else if best_bid.quantity < order.quantity {
-                            total_quantity_matched += best_bid.quantity;
-                            let remaining = order.quantity - best_bid.quantity;
-                            order.quantity = remaining;
-                            continue;
-                        } else {
-                            // Fully matched
-                            total_quantity_matched += best_bid.quantity;
-                            order.quantity = 0;
+                while order.quantity > 0 {
+                    let best_bid_price = if order.order_type == OrdType::Market {
+                        self.bids.keys().next_back().cloned()
+                    } else {
+                        self.bids.keys().next_back().filter(|&p| OrderedFloat(order.price) <= *p).cloned()
+                    };
+                    if let Some(price) = best_bid_price {
+                        let queue = self.bids.get_mut(&price).unwrap();
+                        while order.quantity > 0 && !queue.is_empty() {
+                            if let Some(mut best_bid) = queue.pop_front() {
+                                if best_bid.quantity > order.quantity {
+                                    best_bid.quantity -= order.quantity;
+                                    order.quantity = 0;
+                                    queue.push_front(best_bid);
+                                } else if best_bid.quantity < order.quantity {
+                                    order.quantity -= best_bid.quantity;
+                                    self.order_index.remove(&best_bid.order_id);
+                                } else {
+                                    order.quantity = 0;
+                                    self.order_index.remove(&best_bid.order_id);
+                                }
+                            }
+                        }
+                        if queue.is_empty() {
+                            self.bids.remove(&price);
+                        }
+                        if order.quantity == 0 {
                             break;
                         }
                     } else {
@@ -241,13 +254,40 @@ impl OrderBook {
                     _ => {
                         // Other TIF: post remaining quantity to book
                         if order.quantity > 0 {
-                            self.asks.push(Reverse(order));
+                            self.asks.entry(OrderedFloat(order.price)).or_default().push_back(order.clone());
+                            self.order_index.insert(order.order_id, (Side::Sell, order.price));
                         }
                     }
                 }
             }
             _ => {}
         }
+    }
+
+    pub fn remove_order(&mut self, order_id: u64, client_id: ClientID) -> bool {
+        if let Some((side, price)) = self.order_index.get(&order_id).cloned() {
+            let queue_opt = match side {
+                Side::Buy => self.bids.get_mut(&OrderedFloat(price)),
+                Side::Sell => self.asks.get_mut(&OrderedFloat(price)),
+                _ => None,
+            };
+            if let Some(queue) = queue_opt {
+                let pos = queue.iter().position(|o| o.order_id == order_id && o.account_id == client_id);
+                if let Some(idx) = pos {
+                    queue.remove(idx);
+                    if queue.is_empty() {
+                        match side {
+                            Side::Buy => { self.bids.remove(&OrderedFloat(price)); }
+                            Side::Sell => { self.asks.remove(&OrderedFloat(price)); }
+                            _ => {}
+                        }
+                    }
+                    self.order_index.remove(&order_id);
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -271,129 +311,123 @@ impl Exchange {
         }
     }
 
-    pub(crate) fn create_order(
-        &mut self,
-        send_timestamp: Timestamp,
-        price: f64,
-        quantity: u32,
-        side: Side,
-        order_type: OrdType,
-        time_in_force: TimeInForce,
-        exec_instruction: ExecInst,
-        instrument_id: &str,
-        account_id: &str,
-        sender_org_id: &str,
-        sender_sub_id: &str,
-        client_order_id: &str,
-
-    ) -> Order {
-
-        let o = Order {
-            server_order_id: self.order_counter,
-            send_timestamp: send_timestamp,
-            receive_timestamp: Timestamp::utc_now(),
-            price: price,
-            quantity: quantity,
-            side: side,
-            order_type: order_type,
-            time_in_force: time_in_force,
-            exec_instruction: exec_instruction,
-            instrument_id: instrument_id.into(),
-            account_id: account_id.into(),
-            sender_org_id: sender_org_id.into(),
-            sender_sub_id: sender_sub_id.into(),
-            client_order_id: client_order_id.into()
-        };
-        self.order_counter += 1;
-        o
-    }
-
-    pub(crate) fn submit_order(&mut self, order: Order) {
-        if !self.books.contains_key(&order.instrument_id) {
-            // Instrument does not exist, reject order
-            return;
-        }
-
-        if order.order_type == OrdType::Market {
-            if let Some(book) = self.books.get(&order.instrument_id) {
-                match order.side {
-                    Side::Buy => {
-                        if book.asks.is_empty() {
-                            return;
-                        }
-                    }
-                    Side::Sell => {
-                        if book.bids.is_empty() {
-                            return;
-                        }
-                    }
-                    _ => {}
-                }
-            } else {
-                return;
+    pub fn handle_message(&mut self, message: EngineMessage) -> Option<EngineMessage> {
+        match message {
+            EngineMessage::CreateInstrument { instrument_id, .. } => {
+                // Extract sending_time and receiving_time if present (future logic)
+                self.books.entry(instrument_id).or_insert_with(|| OrderBook {
+                    bids: BTreeMap::new(),
+                    asks: BTreeMap::new(),
+                    order_index: HashMap::new(),
+                });
+                None
             }
-        }
-        let book = self.books.get_mut(&order.instrument_id).unwrap();
-        book.match_order(order);
-    }
+            EngineMessage::NewOrder {
+                sending_time,
+                receiving_time,
+                client_id,
+                account_id,
+                instrument_id,
+                order_type,
+                side,
+                quantity,
+                price,
+                time_in_force,
+            } => {
+                // Extract sending_time and receiving_time at the beginning of the branch
+                let receiving_time = receiving_time;
 
-    pub(crate) fn cancel_order(&mut self, ticker: String, side: Side, order_id: u64) -> bool {
-        if let Some(book) = self.books.get_mut(&ticker) {
-            match side {
-                Side::Buy => {
-                    let mut new_bids = BinaryHeap::new();
-                    let mut removed = false;
-                    while let Some(order) = book.bids.pop() {
-                        if order.server_order_id == order_id {
-                            removed = true;
-                            continue;
-                        }
-                        new_bids.push(order);
-                    }
-                    book.bids = new_bids;
-                    return removed;
+                if !self.books.contains_key(&instrument_id) {
+                    return Some(EngineMessage::OrderRejected {
+                        reason: "Unknown instrument".to_string(),
+                        client_id,
+                    });
                 }
-                Side::Sell => {
-                    let mut new_asks = BinaryHeap::new();
-                    let mut removed = false;
-                    while let Some(Reverse(order)) = book.asks.pop() {
-                        if order.server_order_id == order_id {
-                            removed = true;
-                            continue;
-                        }
-                        new_asks.push(Reverse(order));
+
+                let order_id = self.order_counter;
+                self.order_counter += 1;
+
+                let order = Order {
+                    order_id: order_id.clone(),
+                    send_timestamp: sending_time,
+                    receive_timestamp: receiving_time,
+                    price: price.unwrap_or(0.0),
+                    quantity,
+                    side,
+                    order_type,
+                    time_in_force: time_in_force.unwrap_or(TimeInForce::Day),
+                    exec_instruction: ExecInst::StayOnOfferSide,
+                    instrument_id: instrument_id.clone(),
+                    account_id: account_id,
+                    sender_id: client_id.clone(),
+                };
+
+                let book = self.books.get_mut(&instrument_id).unwrap();
+                book.match_order(order);
+                Some(EngineMessage::OrderAccepted {
+                    client_id,
+                    order_id
+                })
+            }
+            EngineMessage::CancelOrder {
+                sending_time,
+                receiving_time,
+                order_id,
+                client_id: client_id,
+                ..
+            } => {
+                // Extract sending_time and receiving_time at the beginning of the branch (future logic)
+                let _sending_time = sending_time;
+                let _receiving_time = receiving_time;
+                for (_instrument, book) in &mut self.books {
+                    let removed = book.remove_order(order_id, client_id.to_owned());
+                    if removed {
+                        return Some(EngineMessage::OrderCancelled {
+                            order_id,
+                            client_id: client_id.clone(),
+                        });
                     }
-                    book.asks = new_asks;
-                    return removed;
                 }
-                _ => {}
+                Some(EngineMessage::OrderRejected {
+                    reason: "Order not found".to_string(),
+                    client_id: client_id.clone(),
+                })
             }
+            EngineMessage::AmendOrder {
+                sending_time,
+                receiving_time,
+                order_id,
+                new_quantity,
+                new_price,
+                time_in_force,
+                ..
+            } => {
+                // Extract sending_time and receiving_time at the beginning of the branch (future logic)
+                let _sending_time = sending_time;
+                let _receiving_time = receiving_time;
+                // Amend logic not implemented yet
+                Some(EngineMessage::LogEvent {
+                    message: "Amend not yet implemented".to_string(),
+                })
+            }
+            EngineMessage::AdvanceTime { sending_time, receiving_time, timestamp, .. } => {
+                // Extract sending_time and receiving_time at the beginning of the branch (future logic)
+                let _sending_time = sending_time;
+                let _receiving_time = receiving_time;
+                // AdvanceTime logic not implemented yet
+                Some(EngineMessage::LogEvent {
+                    message: "AdvanceTime not yet implemented".to_string(),
+                })
+            }
+            EngineMessage::LogEvent { message: log_message, .. } => {
+                // Extract sending_time and receiving_time at the beginning of the branch (future logic)
+                Some(EngineMessage::LogEvent {
+                    message: log_message,
+                })
+            }
+            _ => Some(EngineMessage::LogEvent {
+                message: "Unsupported message received".to_string(),
+            }),
         }
-        false
-    }
-
-    pub(crate) fn get_order_book(&self, ticker: &str) -> Option<OrderBook> {
-        self.books.get(ticker).cloned()
-    }
-
-    pub(crate) fn get_bids(&self, ticker: &str) -> Option<Vec<Order>> {
-        self.books.get(ticker).map(|book| {
-            book.bids.iter().cloned().collect()
-        })
-    }
-
-    pub(crate) fn get_asks(&self, ticker: &str) -> Option<Vec<Order>> {
-        self.books.get(ticker).map(|book| {
-            book.asks.iter().map(|r| r.0.clone()).collect()
-        })
-    }
-
-    pub(crate) fn create_instrument(&mut self, symbol: &str) {
-        self.books.entry(symbol.into()).or_insert_with(|| {
-            OrderBook {
-                bids: BinaryHeap::new(),
-                asks: BinaryHeap::new(),
-            }
-        });
     }
 }
