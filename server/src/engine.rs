@@ -10,6 +10,7 @@ pub enum EngineMessage {
         receiving_time: Timestamp,
         client_id: ClientID,
         account_id: AccountID,
+        client_order_id: Option<ClOrdID>,
         instrument_id: InstrumentID,
         order_type: OrdType,
         side: Side,

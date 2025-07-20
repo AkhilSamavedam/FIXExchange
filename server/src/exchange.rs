@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, VecDeque, HashMap};
 use std::cmp::{Ordering, PartialEq};
 
 use ordered_float::OrderedFloat;
-use serde::{Serialize, Deserialize};
 use fefix::definitions::fix50::*;
 use fefix::fix_values::Timestamp;
 
@@ -12,6 +11,7 @@ use crate::types::*;
 #[derive(Clone, Debug)]
 struct Order {
     order_id: OrderID,
+    client_order_id: ClOrdID,
     price: Price,
     quantity: Quantity,
     send_timestamp: Timestamp,
@@ -49,14 +49,9 @@ impl PartialOrd for Order {
 struct OrderBook {
     bids: BTreeMap<OrderedFloat<f64>, VecDeque<Order>>, // descending order if needed
     asks: BTreeMap<OrderedFloat<f64>, VecDeque<Order>>, // ascending order
-    order_index: HashMap<u64, (Side, f64)>,
+    order_index: HashMap<OrderID, Order>,
 }
 
-impl PartialEq<ClientID> for AccountID {
-    fn eq(&self, other: &ClientID) -> bool {
-        todo!()
-    }
-}
 
 impl OrderBook {
     fn match_order(&mut self, mut order: Order) -> Vec<EngineMessage> {
@@ -66,7 +61,7 @@ impl OrderBook {
             match order.side {
                 Side::Buy => {
                     if let Some((&best_ask_price, _)) = self.asks.iter().next() {
-                        if best_ask_price < OrderedFloat(order.price) {
+                        if best_ask_price < order.price {
                             // Not triggered yet, buffer order
                             return fills;
                         }
@@ -79,7 +74,7 @@ impl OrderBook {
                 }
                 Side::Sell => {
                     if let Some((&best_bid_price, _)) = self.bids.iter().next_back() {
-                        if best_bid_price > OrderedFloat(order.price) {
+                        if best_bid_price > order.price {
                             // Not triggered yet, buffer order
                             return fills;
                         }
@@ -99,7 +94,7 @@ impl OrderBook {
             match order.side {
                 Side::Buy => {
                     if let Some((&best_ask_price, _)) = self.asks.iter().next() {
-                        if best_ask_price < OrderedFloat(order.price) {
+                        if best_ask_price < order.price {
                             // Not triggered yet, buffer order
                             return fills;
                         }
@@ -112,7 +107,7 @@ impl OrderBook {
                 }
                 Side::Sell => {
                     if let Some((&best_bid_price, _)) = self.bids.iter().next_back() {
-                        if best_bid_price > OrderedFloat(order.price) {
+                        if best_bid_price > order.price {
                             // Not triggered yet, buffer order
                             return fills;
                         }
@@ -134,7 +129,7 @@ impl OrderBook {
                     let best_ask_price = if order.order_type == OrdType::Market {
                         self.asks.keys().next().cloned()
                     } else {
-                        self.asks.keys().next().filter(|&p| OrderedFloat(order.price) >= *p).cloned()
+                        self.asks.keys().next().filter(|&p| order.price >= *p).cloned()
                     };
                     if let Some(price) = best_ask_price {
                         let queue = self.asks.get_mut(&price).unwrap();
@@ -146,7 +141,7 @@ impl OrderBook {
                                     order_id: order.order_id,
                                     filled_quantity: trade_qty,
                                     remaining_quantity: order.quantity - trade_qty,
-                                    price: price.into_inner(),
+                                    price: price,
                                     instrument_id: order.instrument_id.clone(),
                                     client_id: order.sender_id.clone(),
                                 });
@@ -155,7 +150,7 @@ impl OrderBook {
                                     order_id: best_ask.order_id,
                                     filled_quantity: trade_qty,
                                     remaining_quantity: best_ask.quantity - trade_qty,
-                                    price: price.into_inner(),
+                                    price: price,
                                     instrument_id: best_ask.instrument_id.clone(),
                                     client_id: best_ask.sender_id.clone(),
                                 });
@@ -208,8 +203,8 @@ impl OrderBook {
                     _ => {
                         // Other TIF: post remaining quantity to book
                         if order.quantity > 0 {
-                            self.bids.entry(OrderedFloat(order.price)).or_default().push_back(order.clone());
-                            self.order_index.insert(order.order_id, (Side::Buy, order.price));
+                            self.bids.entry(order.price).or_default().push_back(order.clone());
+                            self.order_index.insert(order.order_id, order);
                         }
                     }
                 }
@@ -219,7 +214,7 @@ impl OrderBook {
                     let best_bid_price = if order.order_type == OrdType::Market {
                         self.bids.keys().next_back().cloned()
                     } else {
-                        self.bids.keys().next_back().filter(|&p| OrderedFloat(order.price) <= *p).cloned()
+                        self.bids.keys().next_back().filter(|&p| order.price <= *p).cloned()
                     };
                     if let Some(price) = best_bid_price {
                         let queue = self.bids.get_mut(&price).unwrap();
@@ -231,7 +226,7 @@ impl OrderBook {
                                     order_id: order.order_id,
                                     filled_quantity: trade_qty,
                                     remaining_quantity: order.quantity - trade_qty,
-                                    price: price.into_inner(),
+                                    price: price,
                                     instrument_id: order.instrument_id.clone(),
                                     client_id: order.sender_id.clone(),
                                 });
@@ -240,7 +235,7 @@ impl OrderBook {
                                     order_id: best_bid.order_id,
                                     filled_quantity: trade_qty,
                                     remaining_quantity: best_bid.quantity - trade_qty,
-                                    price: price.into_inner(),
+                                    price: price,
                                     instrument_id: best_bid.instrument_id.clone(),
                                     client_id: best_bid.sender_id.clone(),
                                 });
@@ -293,8 +288,8 @@ impl OrderBook {
                     _ => {
                         // Other TIF: post remaining quantity to book
                         if order.quantity > 0 {
-                            self.asks.entry(OrderedFloat(order.price)).or_default().push_back(order.clone());
-                            self.order_index.insert(order.order_id, (Side::Sell, order.price));
+                            self.asks.entry(order.price).or_default().push_back(order.clone());
+                            self.order_index.insert(order.order_id, order);
                         }
                     }
                 }
@@ -305,20 +300,19 @@ impl OrderBook {
     }
 
     fn remove_order(&mut self, order_id: u64, client_id: ClientID) -> bool {
-        if let Some((side, price)) = self.order_index.get(&order_id).cloned() {
-            let queue_opt = match side {
-                Side::Buy => self.bids.get_mut(&OrderedFloat(price)),
-                Side::Sell => self.asks.get_mut(&OrderedFloat(price)),
+        if let Some(order) = self.order_index.get(&order_id).cloned() {
+            let queue_opt = match order.side {
+                Side::Buy => self.bids.get_mut(&order.price),
+                Side::Sell => self.asks.get_mut(&order.price),
                 _ => None,
             };
             if let Some(queue) = queue_opt {
-                let pos = queue.iter().position(|o| o.order_id == order_id && o.account_id == client_id);
-                if let Some(idx) = pos {
+                if let Some(idx) = queue.iter().position(|o| o.order_id == order_id) {
                     queue.remove(idx);
                     if queue.is_empty() {
-                        match side {
-                            Side::Buy => { self.bids.remove(&OrderedFloat(price)); }
-                            Side::Sell => { self.asks.remove(&OrderedFloat(price)); }
+                        match order.side {
+                            Side::Buy => { self.bids.remove(&order.price); }
+                            Side::Sell => { self.asks.remove(&order.price); }
                             _ => {}
                         }
                     }
@@ -331,8 +325,8 @@ impl OrderBook {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Bankroll {
+#[derive(Debug)]
+struct Bankroll {
     pub cash: f64,
     pub positions: HashMap<InstrumentID, AccountBalance>, // instrument -> quantity
 }
@@ -340,7 +334,7 @@ pub struct Bankroll {
 #[derive(Debug)]
 pub struct Exchange {
     order_counter: u64,
-    books: HashMap<String, OrderBook>,
+    books: HashMap<InstrumentID, OrderBook>,
 }
 
 impl Exchange {
@@ -367,6 +361,7 @@ impl Exchange {
                 receiving_time,
                 client_id,
                 account_id,
+                client_order_id,
                 instrument_id,
                 order_type,
                 side,
@@ -389,9 +384,10 @@ impl Exchange {
 
                 let order = Order {
                     order_id: order_id.clone(),
+                    client_order_id: client_order_id.unwrap_or("".to_string()),
                     send_timestamp: sending_time,
                     receive_timestamp: receiving_time,
-                    price: price.unwrap_or(0.0),
+                    price: price.unwrap_or(Price::from(0.0)),
                     quantity,
                     side,
                     order_type,

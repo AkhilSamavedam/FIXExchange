@@ -2,7 +2,7 @@ use fefix::{prelude::*};
 use fefix::tagvalue::{Decoder, Config};
 use fefix::definitions::fix50::*;
 use fefix::fix_values::Timestamp;
-
+use ordered_float::OrderedFloat;
 use crate::types::*;
 use crate::engine::EngineMessage;
 
@@ -95,9 +95,9 @@ pub fn handle_fix_message(message: &str) -> EngineMessage {
             let time_in_force = msg.fv::<TimeInForce>(TIME_IN_FORCE).ok();
 
             // Only parse price if order type requires it
-            let price = match order_type {
-                OrdType::Limit | OrdType::StopLimit => match msg.fv::<Price>(PRICE) {
-                    Ok(p) => Some(p),
+            let price: Option<Price> = match order_type {
+                OrdType::Limit | OrdType::StopLimit => match msg.fv::<f64>(PRICE) {
+                    Ok(p) => Some(OrderedFloat(p)),
                     Err(_) => {
                         return EngineMessage::InvalidMessage {
                             reason: "Missing or invalid Price for limit/stop-limit order.".to_string(),
@@ -118,11 +118,14 @@ pub fn handle_fix_message(message: &str) -> EngineMessage {
                 }
             };
 
+            let client_order_id = msg.fv::<&str>(CL_ORD_ID).ok().map(|id| id.to_string());
+
             EngineMessage::NewOrder {
                 sending_time,
                 receiving_time,
                 client_id,
                 account_id,
+                client_order_id,
                 instrument_id,
                 order_type,
                 side,
@@ -172,7 +175,7 @@ pub fn handle_fix_message(message: &str) -> EngineMessage {
                     };
                 }
             };
-            
+
             EngineMessage::CreateInstrument {
                 sending_time,
                 receiving_time,
@@ -190,8 +193,9 @@ pub fn handle_fix_message(message: &str) -> EngineMessage {
                     };
                 }
             };
+
             let new_quantity = msg.fv::<Quantity>(ORDER_QTY).ok();
-            let new_price = msg.fv::<Price>(PRICE).ok();
+            let new_price: Option<Price> = msg.fv::<f64>(PRICE).ok().map(|p| OrderedFloat(p));
             let time_in_force = msg.fv::<TimeInForce>(TIME_IN_FORCE).ok();
 
             EngineMessage::AmendOrder {

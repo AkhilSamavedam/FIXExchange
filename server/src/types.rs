@@ -1,6 +1,9 @@
 use fefix::{Buffer, FixValue};
+use ordered_float::OrderedFloat;
 
 pub(crate) type OrderID = u64;
+
+pub(crate) type ClOrdID = String;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ClientID {
@@ -16,7 +19,7 @@ impl ClientID {
 
 pub(crate) type InstrumentID = String;
 pub(crate) type Quantity = u64;
-pub(crate) type Price = f64;
-pub(crate) type AccountBalance = i64;
+pub(crate) type Price = OrderedFloat<f64>;
+pub(crate) type AccountBalance = OrderedFloat<f64>;
 
 pub(crate) type AccountID = String;
