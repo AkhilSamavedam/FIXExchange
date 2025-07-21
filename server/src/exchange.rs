@@ -47,8 +47,8 @@ impl PartialOrd for Order {
 
 #[derive(Clone, Debug)]
 struct OrderBook {
-    bids: BTreeMap<OrderedFloat<f64>, VecDeque<Order>>, // descending order if needed
-    asks: BTreeMap<OrderedFloat<f64>, VecDeque<Order>>, // ascending order
+    bids: BTreeMap<Price, VecDeque<Order>>, // descending order if needed
+    asks: BTreeMap<Price, VecDeque<Order>>, // ascending order
     order_index: HashMap<OrderID, Order>,
 }
 

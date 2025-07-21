@@ -14,3 +14,4 @@ parking_lot = "0.12.4"
 fefix = { version = "0.7", features = ["fix50", "utils-tokio", "utils-decimal"] }
 ordered-float = "5.0.0"
 core_affinity = "0.8.3"
+fork_union = "2.2.0"
