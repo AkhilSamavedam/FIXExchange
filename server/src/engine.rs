@@ -28,11 +28,13 @@ pub enum EngineMessage {
     CreateInstrument {
         sending_time: Timestamp,
         receiving_time: Timestamp,
+        client_id: ClientID,
         instrument_id: InstrumentID,
     },
     AmendOrder {
         sending_time: Timestamp,
         receiving_time: Timestamp,
+        client_id: ClientID,
         order_id: OrderID,
         new_quantity: Option<Quantity>,
         new_price: Option<Price>,
@@ -44,8 +46,8 @@ pub enum EngineMessage {
         order_id: OrderID,
     },
     OrderRejected {
-        reason: String,
         client_id: ClientID,
+        reason: String,
     },
     OrderFilled {
         client_id: ClientID,
@@ -71,6 +73,7 @@ pub enum EngineMessage {
     },
     // Data collection & backtesting
     Snapshot {
+        client_id: ClientID,
         timestamp: Timestamp,
         instrument_id: InstrumentID,
         bids: Vec<(Price, Quantity)>, // (price, quantity)
@@ -79,9 +82,11 @@ pub enum EngineMessage {
     AdvanceTime {
         sending_time: Timestamp,
         receiving_time: Timestamp,
+        client_id: ClientID,
         timestamp: Timestamp,
     },
     LogEvent {
+        client_id: Option<ClientID>,
         message: String,
     },
 }

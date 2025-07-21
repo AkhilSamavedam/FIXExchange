@@ -1,14 +1,26 @@
-use fefix::{Buffer, FixValue};
+use std::fmt::Display;
+
 use ordered_float::OrderedFloat;
 
 pub(crate) type OrderID = u64;
 
 pub(crate) type ClOrdID = String;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(crate) struct ClientID {
     comp_id: String,
     sub_id: Option<String>
+}
+
+impl Display for ClientID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(sub_id) = &self.sub_id {
+            Ok(write!(f, "{}::{}", self.comp_id, sub_id)?)
+        }
+        else {
+            Ok(write!(f, "{}", self.comp_id)?)
+        }
+    }
 }
 
 impl ClientID {

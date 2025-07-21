@@ -165,6 +165,10 @@ pub fn handle_fix_message(message: &str) -> EngineMessage {
             }
         }
         "UCI" => {
+
+            let sender_comp_id = msg.fv::<&str>(SENDER_COMP_ID).unwrap_or("UNKNOWN");
+            let sender_sub_id = msg.fv::<&str>(SENDER_SUB_ID).ok();
+            
             // Custom type: Create Instrument
             let instrument_id: InstrumentID = match msg.fv::<&str>(SYMBOL) {
                 Ok(id) => id.to_string(),
@@ -177,12 +181,16 @@ pub fn handle_fix_message(message: &str) -> EngineMessage {
             };
 
             EngineMessage::CreateInstrument {
+                client_id: ClientID::new(sender_comp_id.to_string(), sender_sub_id.map(str::to_string)),
                 sending_time,
                 receiving_time,
                 instrument_id,
             }
         }
         "G" => {
+            let sender_comp_id = msg.fv::<&str>(SENDER_COMP_ID).unwrap_or("UNKNOWN");
+            let sender_sub_id = msg.fv::<&str>(SENDER_SUB_ID).ok();
+            
             // Amend Order
             let order_id = match msg.fv::<OrderID>(ORDER_ID) {
                 Ok(id) => id,
@@ -199,6 +207,7 @@ pub fn handle_fix_message(message: &str) -> EngineMessage {
             let time_in_force = msg.fv::<TimeInForce>(TIME_IN_FORCE).ok();
 
             EngineMessage::AmendOrder {
+                client_id: ClientID::new(sender_comp_id.to_string(), sender_sub_id.map(str::to_string)),
                 sending_time,
                 receiving_time,
                 order_id,

@@ -444,34 +444,25 @@ impl Exchange {
                 })
             }
             EngineMessage::AmendOrder {
-                sending_time,
-                receiving_time,
+                client_id,
                 ..
             } => {
-                // Extract sending_time and receiving_time at the beginning of the branch (future logic)
-                let _sending_time = sending_time;
-                let _receiving_time = receiving_time;
                 // Amend logic not implemented yet
                 Some(EngineMessage::LogEvent {
+                    client_id: Some(client_id),
                     message: "Amend not yet implemented".to_string(),
                 })
             }
-            EngineMessage::AdvanceTime { sending_time, receiving_time, timestamp, .. } => {
-                // Extract sending_time and receiving_time at the beginning of the branch (future logic)
-                let _sending_time = sending_time;
-                let _receiving_time = receiving_time;
+            EngineMessage::AdvanceTime { client_id, .. } => {
+  
                 // AdvanceTime logic not implemented yet
                 Some(EngineMessage::LogEvent {
+                    client_id: Some(client_id),
                     message: "AdvanceTime not yet implemented".to_string(),
                 })
             }
-            EngineMessage::LogEvent { message: log_message, .. } => {
-                // Extract sending_time and receiving_time at the beginning of the branch (future logic)
-                Some(EngineMessage::LogEvent {
-                    message: log_message,
-                })
-            }
             _ => Some(EngineMessage::LogEvent {
+                client_id: None,
                 message: "Unsupported message received".to_string(),
             }),
         }
