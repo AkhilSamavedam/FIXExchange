@@ -54,7 +54,7 @@ struct OrderBook {
 
 
 impl OrderBook {
-    fn match_order(&mut self, mut order: Order) -> Vec<EngineMessage> {
+    fn match_order(&mut self, mut order: Order, accounts: &mut HashMap<AccountID, Bankroll>) -> Vec<EngineMessage> {
         let mut fills = Vec::new();
         // Handle Stop orders
         if let OrdType::Stop = order.order_type {
@@ -154,6 +154,24 @@ impl OrderBook {
                                     instrument_id: best_ask.instrument_id.clone(),
                                     client_id: best_ask.sender_id.clone(),
                                 });
+                                // --- Account updates for Buy ---
+                                // Buyer: order.account_id, Seller: best_ask.account_id
+                                // Buyer: deduct cash, increase position
+                                if let Some(buyer_account) = accounts.get_mut(&order.account_id) {
+                                    buyer_account.cash -= price * trade_qty as f64;
+                                    buyer_account.positions
+                                        .entry(order.instrument_id.clone())
+                                        .and_modify(|pos| *pos += trade_qty)
+                                        .or_insert(trade_qty);
+                                }
+                                // Seller: increase cash, decrease position
+                                if let Some(seller_account) = accounts.get_mut(&best_ask.account_id) {
+                                    seller_account.cash += price * trade_qty as f64;
+                                    seller_account.positions
+                                        .entry(best_ask.instrument_id.clone())
+                                        .and_modify(|pos| *pos -= trade_qty)
+                                        .or_insert(0);
+                                }
                                 if best_ask.quantity > order.quantity {
                                     best_ask.quantity -= order.quantity;
                                     order.quantity = 0;
@@ -239,6 +257,24 @@ impl OrderBook {
                                     instrument_id: best_bid.instrument_id.clone(),
                                     client_id: best_bid.sender_id.clone(),
                                 });
+                                // --- Account updates for Sell ---
+                                // Seller: order.account_id, Buyer: best_bid.account_id
+                                // Seller: increase cash, decrease position
+                                if let Some(seller_account) = accounts.get_mut(&order.account_id) {
+                                    seller_account.cash += price * trade_qty as f64;
+                                    seller_account.positions
+                                        .entry(order.instrument_id.clone())
+                                        .and_modify(|pos| *pos -= trade_qty)
+                                        .or_insert(0);
+                                }
+                                // Buyer: deduct cash, increase position
+                                if let Some(buyer_account) = accounts.get_mut(&best_bid.account_id) {
+                                    buyer_account.cash -= price * trade_qty as f64;
+                                    buyer_account.positions
+                                        .entry(best_bid.instrument_id.clone())
+                                        .and_modify(|pos| *pos += trade_qty)
+                                        .or_insert(trade_qty);
+                                }
                                 if best_bid.quantity > order.quantity {
                                     best_bid.quantity -= order.quantity;
                                     order.quantity = 0;
@@ -299,7 +335,7 @@ impl OrderBook {
         fills
     }
 
-    fn remove_order(&mut self, order_id: u64, client_id: ClientID) -> bool {
+    fn remove_order(&mut self, order_id: OrderID, accounts: &mut HashMap<AccountID, Bankroll>) -> bool {
         if let Some(order) = self.order_index.get(&order_id).cloned() {
             let queue_opt = match order.side {
                 Side::Buy => self.bids.get_mut(&order.price),
@@ -317,6 +353,23 @@ impl OrderBook {
                         }
                     }
                     self.order_index.remove(&order_id);
+                    // Refund cash or restore position on cancellation
+                    match order.side {
+                        Side::Buy => {
+                            if let Some(account) = accounts.get_mut(&order.account_id) {
+                                account.cash += order.price * order.quantity as f64;
+                            }
+                        }
+                        Side::Sell => {
+                            if let Some(account) = accounts.get_mut(&order.account_id) {
+                                account.positions
+                                    .entry(order.instrument_id.clone())
+                                    .and_modify(|pos| *pos += order.quantity)
+                                    .or_insert(order.quantity);
+                            }
+                        }
+                        _ => {}
+                    }
                     return true;
                 }
             }
@@ -327,13 +380,14 @@ impl OrderBook {
 
 #[derive(Debug)]
 struct Bankroll {
-    pub cash: f64,
-    pub positions: HashMap<InstrumentID, AccountBalance>, // instrument -> quantity
+    pub cash: AccountBalance,
+    pub positions: HashMap<InstrumentID, Quantity>, // instrument -> quantity
 }
 
 #[derive(Debug)]
 pub struct Exchange {
-    order_counter: u64,
+    order_counter: OrderID,
+    accounts: HashMap<AccountID, Bankroll>,
     books: HashMap<InstrumentID, OrderBook>,
 }
 
@@ -341,6 +395,7 @@ impl Exchange {
     pub fn new() -> Self {
         Self {
             order_counter: 1,
+            accounts: HashMap::new(),
             books: HashMap::new(),
         }
     }
@@ -379,6 +434,23 @@ impl Exchange {
                     });
                 }
 
+                let unit_price = price.unwrap_or(Price::from(0.0));
+                let total_cost = unit_price * quantity as f64;
+
+                let account = self.accounts.entry(account_id.clone()).or_insert_with(|| Bankroll {
+                    cash: Price::from(1000.0),
+                    positions: HashMap::new(),
+                });
+
+                if account.cash < total_cost {
+                    return Some(EngineMessage::OrderRejected {
+                        reason: "Insufficient funds".to_string(),
+                        client_id,
+                    });
+                }
+
+                account.cash -= total_cost;
+
                 let order_id = self.order_counter;
                 self.order_counter += 1;
 
@@ -399,7 +471,7 @@ impl Exchange {
                 };
 
                 let book = self.books.get_mut(&instrument_id).unwrap();
-                let mut responses = book.match_order(order);
+                let mut responses = book.match_order(order, &mut self.accounts);
                 responses.push(EngineMessage::OrderAccepted {
                     client_id,
                     order_id
@@ -423,14 +495,14 @@ impl Exchange {
                 sending_time,
                 receiving_time,
                 order_id,
-                client_id: client_id,
+                client_id,
                 ..
             } => {
                 // Extract sending_time and receiving_time at the beginning of the branch (future logic)
                 let _sending_time = sending_time;
                 let _receiving_time = receiving_time;
                 for (_instrument, book) in &mut self.books {
-                    let removed = book.remove_order(order_id, client_id.to_owned());
+                    let removed = book.remove_order(order_id, &mut self.accounts);
                     if removed {
                         return Some(EngineMessage::OrderCancelled {
                             order_id,
@@ -454,7 +526,7 @@ impl Exchange {
                 })
             }
             EngineMessage::AdvanceTime { client_id, .. } => {
-  
+
                 // AdvanceTime logic not implemented yet
                 Some(EngineMessage::LogEvent {
                     client_id: Some(client_id),
