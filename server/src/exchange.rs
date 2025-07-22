@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, VecDeque, HashMap};
 use std::cmp::{Ordering, PartialEq};
 
-use ordered_float::OrderedFloat;
 use fefix::definitions::fix50::*;
 use fefix::fix_values::Timestamp;
 

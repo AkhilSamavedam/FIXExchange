@@ -2,7 +2,7 @@ use fefix::{prelude::*};
 use fefix::tagvalue::{Decoder, Config};
 use fefix::definitions::fix50::*;
 use fefix::fix_values::Timestamp;
-use ordered_float::OrderedFloat;
+
 use crate::types::*;
 use crate::engine::EngineMessage;
 
@@ -97,7 +97,7 @@ pub fn handle_fix_message(message: &str) -> EngineMessage {
             // Only parse price if order type requires it
             let price: Option<Price> = match order_type {
                 OrdType::Limit | OrdType::StopLimit => match msg.fv::<f64>(PRICE) {
-                    Ok(p) => Some(OrderedFloat(p)),
+                    Ok(p) => Some(Price::from(p)),
                     Err(_) => {
                         return EngineMessage::InvalidMessage {
                             reason: "Missing or invalid Price for limit/stop-limit order.".to_string(),
@@ -168,7 +168,7 @@ pub fn handle_fix_message(message: &str) -> EngineMessage {
 
             let sender_comp_id = msg.fv::<&str>(SENDER_COMP_ID).unwrap_or("UNKNOWN");
             let sender_sub_id = msg.fv::<&str>(SENDER_SUB_ID).ok();
-            
+
             // Custom type: Create Instrument
             let instrument_id: InstrumentID = match msg.fv::<&str>(SYMBOL) {
                 Ok(id) => id.to_string(),
@@ -190,7 +190,7 @@ pub fn handle_fix_message(message: &str) -> EngineMessage {
         "G" => {
             let sender_comp_id = msg.fv::<&str>(SENDER_COMP_ID).unwrap_or("UNKNOWN");
             let sender_sub_id = msg.fv::<&str>(SENDER_SUB_ID).ok();
-            
+
             // Amend Order
             let order_id = match msg.fv::<OrderID>(ORDER_ID) {
                 Ok(id) => id,
@@ -203,7 +203,7 @@ pub fn handle_fix_message(message: &str) -> EngineMessage {
             };
 
             let new_quantity = msg.fv::<Quantity>(ORDER_QTY).ok();
-            let new_price: Option<Price> = msg.fv::<f64>(PRICE).ok().map(|p| OrderedFloat(p));
+            let new_price: Option<Price> = msg.fv::<f64>(PRICE).ok().map(|p| Price::from(p));
             let time_in_force = msg.fv::<TimeInForce>(TIME_IN_FORCE).ok();
 
             EngineMessage::AmendOrder {
